@@ -257,8 +257,8 @@ class Word2Vec extends Serializable with Logging {
     val sc = dataset.context
 
     val expTable = sc.broadcast(createExpTable())
-    val bcVocab = sc.broadcast(vocab)
-    val bcVocabHash = sc.broadcast(vocabHash)
+    lazy val bcVocab = sc.broadcast(vocab)
+    lazy val bcVocabHash = sc.broadcast(vocabHash)
     
     val sentences: RDD[Array[Int]] = words.mapPartitions { iter =>
       new Iterator[Array[Int]] {
@@ -280,12 +280,20 @@ class Word2Vec extends Serializable with Logging {
         }
       }
     }
-    
+
+    if(vocabSize.toFloat*vectorSize/numPartitions>=Int.MaxValue){
+      //increase the number of partitions if each partition's arraySize exceeds Int.MaxValue
+      //the arrays syn0Global&syn1Global with too large size may yield OOM
+      setNumPartitions(math.ceil(1.0*vocabSize*vectorSize/Int.MaxValue).toInt)
+    }
     val newSentences = sentences.repartition(numPartitions).cache()
     val initRandom = new XORShiftRandom(seed)
-    val syn0Global =
+    // make the two global variables (syn0Global & syn1Global) lazy to avoid being serialized
+    // when they are in the  high-order function passed to RDD.mapPartitionsWithIndex.
+    // SparkContext tries to clean and serialize every high-order function passed to some RDD functions such as
+    lazy val syn0Global =
       Array.fill[Float](vocabSize * vectorSize)((initRandom.nextFloat() - 0.5f) / vectorSize)
-    val syn1Global = new Array[Float](vocabSize * vectorSize)
+    lazy val syn1Global = new Array[Float](vocabSize * vectorSize)
     var alpha = startingAlpha
     for (k <- 1 to numIterations) {
       val partial = newSentences.mapPartitionsWithIndex { case (idx, iter) =>
@@ -378,7 +386,7 @@ class Word2Vec extends Serializable with Logging {
       }
     }
     newSentences.unpersist()
-    
+
     val word2VecMap = mutable.HashMap.empty[String, Array[Float]]
     var i = 0
     while (i < vocabSize) {
