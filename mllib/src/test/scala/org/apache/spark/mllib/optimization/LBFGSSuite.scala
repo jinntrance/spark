@@ -19,15 +19,14 @@ package org.apache.spark.mllib.optimization
 
 import scala.util.Random
 
-import org.scalatest.Matchers
+import org.scalatest.{FunSuite, Matchers}
 
-import org.apache.spark.SparkFunSuite
 import org.apache.spark.mllib.linalg.Vectors
 import org.apache.spark.mllib.regression.LabeledPoint
 import org.apache.spark.mllib.util.{LocalClusterSparkContext, MLlibTestSparkContext}
 import org.apache.spark.mllib.util.TestingUtils._
 
-class LBFGSSuite extends SparkFunSuite with MLlibTestSparkContext with Matchers {
+class LBFGSSuite extends FunSuite with MLlibTestSparkContext with Matchers {
 
   val nPoints = 10000
   val A = 2.0
@@ -90,7 +89,7 @@ class LBFGSSuite extends SparkFunSuite with MLlibTestSparkContext with Matchers 
     // it requires 90 iterations in GD. No matter how hard we increase
     // the number of iterations in GD here, the lossGD will be always
     // larger than lossLBFGS. This is based on observation, no theoretically guaranteed
-    assert(math.abs((lossGD.last - loss.last) / loss.last) < 0.02,
+    assert(Math.abs((lossGD.last - loss.last) / loss.last) < 0.02,
       "LBFGS should match GD result within 2% difference.")
   }
 
@@ -122,8 +121,7 @@ class LBFGSSuite extends SparkFunSuite with MLlibTestSparkContext with Matchers 
       numGDIterations,
       regParam,
       miniBatchFrac,
-      initialWeightsWithIntercept,
-      convergenceTol)
+      initialWeightsWithIntercept)
 
     assert(lossGD(0) ~= lossLBFGS(0) absTol 1E-5,
       "The first losses of LBFGS and GD should be the same.")
@@ -191,8 +189,8 @@ class LBFGSSuite extends SparkFunSuite with MLlibTestSparkContext with Matchers 
     // With smaller convergenceTol, it takes more steps.
     assert(lossLBFGS3.length > lossLBFGS2.length)
 
-    // Based on observation, lossLBFGS3 runs 7 iterations, no theoretically guaranteed.
-    assert(lossLBFGS3.length == 7)
+    // Based on observation, lossLBFGS2 runs 5 iterations, no theoretically guaranteed.
+    assert(lossLBFGS3.length == 6)
     assert((lossLBFGS3(4) - lossLBFGS3(5)) / lossLBFGS3(4) < convergenceTol)
   }
 
@@ -222,36 +220,16 @@ class LBFGSSuite extends SparkFunSuite with MLlibTestSparkContext with Matchers 
       numGDIterations,
       regParam,
       miniBatchFrac,
-      initialWeightsWithIntercept,
-      convergenceTol)
+      initialWeightsWithIntercept)
 
     // for class LBFGS and the optimize method, we only look at the weights
     assert(
       (weightLBFGS(0) ~= weightGD(0) relTol 0.02) && (weightLBFGS(1) ~= weightGD(1) relTol 0.02),
       "The weight differences between LBFGS and GD should be within 2%.")
   }
-
-  test("SPARK-18471: LBFGS aggregator on empty partitions") {
-    val regParam = 0
-
-    val initialWeightsWithIntercept = Vectors.dense(0.0)
-    val convergenceTol = 1e-12
-    val numIterations = 1
-    val dataWithEmptyPartitions = sc.parallelize(Seq((1.0, Vectors.dense(2.0))), 2)
-
-    LBFGS.runLBFGS(
-      dataWithEmptyPartitions,
-      gradient,
-      simpleUpdater,
-      numCorrections,
-      convergenceTol,
-      numIterations,
-      regParam,
-      initialWeightsWithIntercept)
-  }
 }
 
-class LBFGSClusterSuite extends SparkFunSuite with LocalClusterSparkContext {
+class LBFGSClusterSuite extends FunSuite with LocalClusterSparkContext {
 
   test("task size should be small") {
     val m = 10

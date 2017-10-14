@@ -17,14 +17,14 @@
 
 package org.apache.spark.mllib.linalg
 
-import breeze.linalg.{DenseVector => BDV, SparseVector => BSV}
+import org.scalatest.FunSuite
 
-import org.apache.spark.SparkFunSuite
+import breeze.linalg.{DenseVector => BDV, SparseVector => BSV}
 
 /**
  * Test Breeze vector conversions.
  */
-class BreezeVectorConversionSuite extends SparkFunSuite {
+class BreezeVectorConversionSuite extends FunSuite {
 
   val arr = Array(0.1, 0.2, 0.3, 0.4)
   val n = 20
@@ -33,12 +33,12 @@ class BreezeVectorConversionSuite extends SparkFunSuite {
 
   test("dense to breeze") {
     val vec = Vectors.dense(arr)
-    assert(vec.asBreeze === new BDV[Double](arr))
+    assert(vec.toBreeze === new BDV[Double](arr))
   }
 
   test("sparse to breeze") {
     val vec = Vectors.sparse(n, indices, values)
-    assert(vec.asBreeze === new BSV[Double](indices, values, n))
+    assert(vec.toBreeze === new BSV[Double](indices, values, n))
   }
 
   test("dense breeze to vector") {

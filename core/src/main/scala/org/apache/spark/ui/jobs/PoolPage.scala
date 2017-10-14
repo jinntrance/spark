@@ -21,44 +21,33 @@ import javax.servlet.http.HttpServletRequest
 
 import scala.xml.Node
 
-import org.apache.spark.scheduler.StageInfo
-import org.apache.spark.ui.{UIUtils, WebUIPage}
+import org.apache.spark.scheduler.{Schedulable, StageInfo}
+import org.apache.spark.ui.{WebUIPage, UIUtils}
 
 /** Page showing specific pool details */
 private[ui] class PoolPage(parent: StagesTab) extends WebUIPage("pool") {
   private val sc = parent.sc
-  private val listener = parent.progressListener
+  private val listener = parent.listener
 
   def render(request: HttpServletRequest): Seq[Node] = {
     listener.synchronized {
-      // stripXSS is called first to remove suspicious characters used in XSS attacks
-      val poolName = Option(UIUtils.stripXSS(request.getParameter("poolname"))).map { poolname =>
-        UIUtils.decodeURLParameter(poolname)
-      }.getOrElse {
-        throw new IllegalArgumentException(s"Missing poolname parameter")
-      }
-
+      val poolName = request.getParameter("poolname")
       val poolToActiveStages = listener.poolToActiveStages
       val activeStages = poolToActiveStages.get(poolName) match {
         case Some(s) => s.values.toSeq
-        case None => Seq.empty[StageInfo]
+        case None => Seq[StageInfo]()
       }
-      val shouldShowActiveStages = activeStages.nonEmpty
-      val activeStagesTable =
-        new StageTableBase(request, activeStages, "", "activeStage", parent.basePath, "stages/pool",
-          parent.progressListener, parent.isFairScheduler, parent.killEnabled,
-          isFailedStage = false)
+      val activeStagesTable = new StageTableBase(activeStages.sortBy(_.submissionTime).reverse,
+        parent.basePath, parent.listener, isFairScheduler = parent.isFairScheduler,
+        killEnabled = parent.killEnabled)
 
       // For now, pool information is only accessible in live UIs
-      val pools = sc.map(_.getPoolForName(poolName).getOrElse {
-        throw new IllegalArgumentException(s"Unknown poolname: $poolName")
-      }).toSeq
+      val pools = sc.map(_.getPoolForName(poolName).get).toSeq
       val poolTable = new PoolTable(pools, parent)
 
-      var content = <h4>Summary </h4> ++ poolTable.toNodeSeq
-      if (shouldShowActiveStages) {
-        content ++= <h4>{activeStages.size} Active Stages</h4> ++ activeStagesTable.toNodeSeq
-      }
+      val content =
+        <h4>Summary </h4> ++ poolTable.toNodeSeq ++
+        <h4>{activeStages.size} Active Stages</h4> ++ activeStagesTable.toNodeSeq
 
       UIUtils.headerSparkPage("Fair Scheduler Pool: " + poolName, content, parent)
     }

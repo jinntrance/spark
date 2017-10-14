@@ -17,8 +17,8 @@
 
 package org.apache.spark.scheduler
 
-import org.apache.spark.TaskState
-import org.apache.spark.TaskState.TaskState
+import scala.collection.mutable.ListBuffer
+
 import org.apache.spark.annotation.DeveloperApi
 
 /**
@@ -28,12 +28,8 @@ import org.apache.spark.annotation.DeveloperApi
 @DeveloperApi
 class TaskInfo(
     val taskId: Long,
-    /**
-     * The index of this task within its task set. Not necessarily the same as the ID of the RDD
-     * partition that the task is computing.
-     */
     val index: Int,
-    val attemptNumber: Int,
+    val attempt: Int,
     val launchTime: Long,
     val executorId: String,
     val host: String,
@@ -52,13 +48,7 @@ class TaskInfo(
    * accumulable to be updated multiple times in a single task or for two accumulables with the
    * same name but different IDs to exist in a task.
    */
-  def accumulables: Seq[AccumulableInfo] = _accumulables
-
-  private[this] var _accumulables: Seq[AccumulableInfo] = Nil
-
-  private[spark] def setAccumulables(newAccumulables: Seq[AccumulableInfo]): Unit = {
-    _accumulables = newAccumulables
-  }
+  val accumulables = ListBuffer[AccumulableInfo]()
 
   /**
    * The time when the task has completed successfully (including the time to remotely fetch
@@ -68,42 +58,34 @@ class TaskInfo(
 
   var failed = false
 
-  var killed = false
-
-  private[spark] def markGettingResult(time: Long) {
+  private[spark] def markGettingResult(time: Long = System.currentTimeMillis) {
     gettingResultTime = time
   }
 
-  private[spark] def markFinished(state: TaskState, time: Long) {
-    // finishTime should be set larger than 0, otherwise "finished" below will return false.
-    assert(time > 0)
+  private[spark] def markSuccessful(time: Long = System.currentTimeMillis) {
     finishTime = time
-    if (state == TaskState.FAILED) {
-      failed = true
-    } else if (state == TaskState.KILLED) {
-      killed = true
-    }
+  }
+
+  private[spark] def markFailed(time: Long = System.currentTimeMillis) {
+    finishTime = time
+    failed = true
   }
 
   def gettingResult: Boolean = gettingResultTime != 0
 
   def finished: Boolean = finishTime != 0
 
-  def successful: Boolean = finished && !failed && !killed
+  def successful: Boolean = finished && !failed
 
   def running: Boolean = !finished
 
   def status: String = {
     if (running) {
-      if (gettingResult) {
-        "GET RESULT"
-      } else {
-        "RUNNING"
-      }
+      "RUNNING"
+    } else if (gettingResult) {
+      "GET RESULT"
     } else if (failed) {
       "FAILED"
-    } else if (killed) {
-      "KILLED"
     } else if (successful) {
       "SUCCESS"
     } else {
@@ -111,7 +93,7 @@ class TaskInfo(
     }
   }
 
-  def id: String = s"$index.$attemptNumber"
+  def id: String = s"$index.$attempt"
 
   def duration: Long = {
     if (!finished) {

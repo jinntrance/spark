@@ -15,7 +15,7 @@ select key, value from src;
 
 set hive.test.mode=true;
 set hive.mapred.mode=strict;
-set mapreduce.jobtracker.address=localhost:58;
+set mapred.job.tracker=localhost:58;
 set hive.exec.mode.local.auto=true;
 
 explain
@@ -24,7 +24,7 @@ select count(1) from t1 join t2 on t1.key=t2.key where t1.ds='1' and t2.ds='1';
 select count(1) from t1 join t2 on t1.key=t2.key where t1.ds='1' and t2.ds='1';
 
 set hive.test.mode=false;
-set mapreduce.jobtracker.address;
+set mapred.job.tracker;
 
 
 

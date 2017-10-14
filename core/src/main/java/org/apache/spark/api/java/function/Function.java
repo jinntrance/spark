@@ -24,7 +24,6 @@ import java.io.Serializable;
  * DoubleFunction are handled separately, to allow PairRDDs and DoubleRDDs to be constructed
  * when mapping RDDs of other types.
  */
-@FunctionalInterface
 public interface Function<T1, R> extends Serializable {
-  R call(T1 v1) throws Exception;
+  public R call(T1 v1) throws Exception;
 }

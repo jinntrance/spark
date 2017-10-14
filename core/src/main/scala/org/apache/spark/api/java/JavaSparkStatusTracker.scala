@@ -17,7 +17,7 @@
 
 package org.apache.spark.api.java
 
-import org.apache.spark.{SparkContext, SparkJobInfo, SparkStageInfo}
+import org.apache.spark.{SparkStageInfo, SparkJobInfo, SparkContext}
 
 /**
  * Low-level status reporting APIs for monitoring job and stage progress.
@@ -31,7 +31,7 @@ import org.apache.spark.{SparkContext, SparkJobInfo, SparkStageInfo}
  * will provide information for the last `spark.ui.retainedStages` stages and
  * `spark.ui.retainedJobs` jobs.
  *
- * @note This class's constructor should be considered private and may be subject to change.
+ * NOTE: this class's constructor should be considered private and may be subject to change.
  */
 class JavaSparkStatusTracker private[spark] (sc: SparkContext) {
 

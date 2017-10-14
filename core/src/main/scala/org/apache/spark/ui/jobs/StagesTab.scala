@@ -20,36 +20,31 @@ package org.apache.spark.ui.jobs
 import javax.servlet.http.HttpServletRequest
 
 import org.apache.spark.scheduler.SchedulingMode
-import org.apache.spark.ui.{SparkUI, SparkUITab, UIUtils}
+import org.apache.spark.ui.{SparkUI, SparkUITab}
 
 /** Web UI showing progress status of all stages in the given SparkContext. */
 private[ui] class StagesTab(parent: SparkUI) extends SparkUITab(parent, "stages") {
   val sc = parent.sc
-  val conf = parent.conf
   val killEnabled = parent.killEnabled
-  val progressListener = parent.jobProgressListener
-  val operationGraphListener = parent.operationGraphListener
-  val executorsListener = parent.executorsListener
+  val listener = parent.jobProgressListener
 
   attachPage(new AllStagesPage(this))
   attachPage(new StagePage(this))
   attachPage(new PoolPage(this))
 
-  def isFairScheduler: Boolean = progressListener.schedulingMode == Some(SchedulingMode.FAIR)
+  def isFairScheduler = listener.schedulingMode.exists(_ == SchedulingMode.FAIR)
 
-  def handleKillRequest(request: HttpServletRequest): Unit = {
-    if (killEnabled && parent.securityManager.checkModifyPermissions(request.getRemoteUser)) {
-      // stripXSS is called first to remove suspicious characters used in XSS attacks
-      val stageId = Option(UIUtils.stripXSS(request.getParameter("id"))).map(_.toInt)
-      stageId.foreach { id =>
-        if (progressListener.activeStages.contains(id)) {
-          sc.foreach(_.cancelStage(id, "killed via the Web UI"))
-          // Do a quick pause here to give Spark time to kill the stage so it shows up as
-          // killed after the refresh. Note that this will block the serving thread so the
-          // time should be limited in duration.
-          Thread.sleep(100)
-        }
+  def handleKillRequest(request: HttpServletRequest) =  {
+    if ((killEnabled) && (parent.securityManager.checkModifyPermissions(request.getRemoteUser))) {
+      val killFlag = Option(request.getParameter("terminate")).getOrElse("false").toBoolean
+      val stageId = Option(request.getParameter("id")).getOrElse("-1").toInt
+      if (stageId >= 0 && killFlag && listener.activeStages.contains(stageId)) {
+        sc.get.cancelStage(stageId)
       }
+      // Do a quick pause here to give Spark time to kill the stage so it shows up as
+      // killed after the refresh. Note that this will block the serving thread so the
+      // time should be limited in duration.
+      Thread.sleep(100)
     }
   }
 

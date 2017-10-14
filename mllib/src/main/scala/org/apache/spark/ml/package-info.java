@@ -16,7 +16,10 @@
  */
 
 /**
- * DataFrame-based machine learning APIs to let users quickly assemble and configure practical
- * machine learning pipelines.
+ * Spark ML is an ALPHA component that adds a new set of machine learning APIs to let users quickly
+ * assemble and configure practical machine learning pipelines.
  */
+@AlphaComponent
 package org.apache.spark.ml;
+
+import org.apache.spark.annotation.AlphaComponent;

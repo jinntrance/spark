@@ -17,13 +17,9 @@
 
 package org.apache.spark.sql.sources
 
-import java.nio.charset.StandardCharsets
-import java.sql.{Date, Timestamp}
+import java.sql.{Timestamp, Date}
 
-import org.apache.spark.rdd.RDD
 import org.apache.spark.sql._
-import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.test.SharedSQLContext
 import org.apache.spark.sql.types._
 
 class DefaultSource extends SimpleScanSource
@@ -32,21 +28,17 @@ class SimpleScanSource extends RelationProvider {
   override def createRelation(
       sqlContext: SQLContext,
       parameters: Map[String, String]): BaseRelation = {
-    SimpleScan(parameters("from").toInt, parameters("TO").toInt)(sqlContext.sparkSession)
+    SimpleScan(parameters("from").toInt, parameters("TO").toInt)(sqlContext)
   }
 }
 
-case class SimpleScan(from: Int, to: Int)(@transient val sparkSession: SparkSession)
-  extends BaseRelation with TableScan {
+case class SimpleScan(from: Int, to: Int)(@transient val sqlContext: SQLContext)
+  extends TableScan {
 
-  override def sqlContext: SQLContext = sparkSession.sqlContext
-
-  override def schema: StructType =
+  override def schema =
     StructType(StructField("i", IntegerType, nullable = false) :: Nil)
 
-  override def buildScan(): RDD[Row] = {
-    sparkSession.sparkContext.parallelize(from to to).map(Row(_))
-  }
+  override def buildScan() = sqlContext.sparkContext.parallelize(from to to).map(Row(_))
 }
 
 class AllDataTypesScanSource extends SchemaRelationProvider {
@@ -54,34 +46,23 @@ class AllDataTypesScanSource extends SchemaRelationProvider {
       sqlContext: SQLContext,
       parameters: Map[String, String],
       schema: StructType): BaseRelation = {
-    // Check that weird parameters are passed correctly.
-    parameters("option_with_underscores")
-    parameters("option.with.dots")
-
-    AllDataTypesScan(
-      parameters("from").toInt,
-      parameters("TO").toInt, schema)(sqlContext.sparkSession)
+    AllDataTypesScan(parameters("from").toInt, parameters("TO").toInt, schema)(sqlContext)
   }
 }
 
 case class AllDataTypesScan(
-    from: Int,
-    to: Int,
-    userSpecifiedSchema: StructType)(@transient val sparkSession: SparkSession)
-  extends BaseRelation
-  with TableScan {
+  from: Int,
+  to: Int,
+  userSpecifiedSchema: StructType)(@transient val sqlContext: SQLContext)
+  extends TableScan {
 
-  override def sqlContext: SQLContext = sparkSession.sqlContext
+  override def schema = userSpecifiedSchema
 
-  override def schema: StructType = userSpecifiedSchema
-
-  override def needConversion: Boolean = true
-
-  override def buildScan(): RDD[Row] = {
-    sparkSession.sparkContext.parallelize(from to to).map { i =>
+  override def buildScan() = {
+    sqlContext.sparkContext.parallelize(from to to).map { i =>
       Row(
         s"str_$i",
-        s"str_$i".getBytes(StandardCharsets.UTF_8),
+        s"str_$i".getBytes(),
         i % 2 == 0,
         i.toByte,
         i.toShort,
@@ -91,25 +72,23 @@ case class AllDataTypesScan(
         i.toDouble,
         new java.math.BigDecimal(i),
         new java.math.BigDecimal(i),
-        Date.valueOf("1970-01-01"),
+        new Date((i + 1) * 8640000),
         new Timestamp(20000 + i),
         s"varchar_$i",
-        s"char_$i",
         Seq(i, i + 1),
         Seq(Map(s"str_$i" -> Row(i.toLong))),
         Map(i -> i.toString),
         Map(Map(s"str_$i" -> i.toFloat) -> Row(i.toLong)),
         Row(i, i.toString),
-          Row(Seq(s"str_$i", s"str_${i + 1}"),
-            Row(Seq(Date.valueOf(s"1970-01-${i + 1}")))))
+        Row(Seq(s"str_$i", s"str_${i + 1}"), Row(Seq(new Date((i + 2) * 8640000)))))
     }
   }
 }
 
-class TableScanSuite extends DataSourceTest with SharedSQLContext {
-  protected override lazy val sql = spark.sql _
+class TableScanSuite extends DataSourceTest {
+  import caseInsensisitiveContext._
 
-  private lazy val tableWithSchemaExpected = (1 to 10).map { i =>
+  var tableWithSchemaExpected = (1 to 10).map { i =>
     Row(
       s"str_$i",
       s"str_$i",
@@ -122,35 +101,31 @@ class TableScanSuite extends DataSourceTest with SharedSQLContext {
       i.toDouble,
       new java.math.BigDecimal(i),
       new java.math.BigDecimal(i),
-      Date.valueOf("1970-01-01"),
+      new Date((i + 1) * 8640000),
       new Timestamp(20000 + i),
       s"varchar_$i",
-      s"char_$i",
       Seq(i, i + 1),
       Seq(Map(s"str_$i" -> Row(i.toLong))),
       Map(i -> i.toString),
       Map(Map(s"str_$i" -> i.toFloat) -> Row(i.toLong)),
       Row(i, i.toString),
-      Row(Seq(s"str_$i", s"str_${i + 1}"), Row(Seq(Date.valueOf(s"1970-01-${i + 1}")))))
+      Row(Seq(s"str_$i", s"str_${i + 1}"), Row(Seq(new Date((i + 2) * 8640000)))))
   }.toSeq
 
-  override def beforeAll(): Unit = {
-    super.beforeAll()
+  before {
     sql(
       """
-        |CREATE TEMPORARY VIEW oneToTen
+        |CREATE TEMPORARY TABLE oneToTen
         |USING org.apache.spark.sql.sources.SimpleScanSource
         |OPTIONS (
         |  From '1',
-        |  To '10',
-        |  option_with_underscores 'someval',
-        |  option.with.dots 'someval'
+        |  To '10'
         |)
       """.stripMargin)
 
     sql(
       """
-        |CREATE TEMPORARY VIEW tableWithSchema (
+        |CREATE TEMPORARY TABLE tableWithSchema (
         |`string$%Field` stRIng,
         |binaryField binary,
         |`booleanField` boolean,
@@ -165,7 +140,6 @@ class TableScanSuite extends DataSourceTest with SharedSQLContext {
         |dateField dAte,
         |timestampField tiMestamp,
         |varcharField varchaR(12),
-        |charField ChaR(18),
         |arrayFieldSimple Array<inT>,
         |arrayFieldComplex Array<Map<String, Struct<key:bigInt>>>,
         |mapFieldSimple MAP<iNt, StRing>,
@@ -176,9 +150,7 @@ class TableScanSuite extends DataSourceTest with SharedSQLContext {
         |USING org.apache.spark.sql.sources.AllDataTypesScanSource
         |OPTIONS (
         |  From '1',
-        |  To '10',
-        |  option_with_underscores 'someval',
-        |  option.with.dots 'someval'
+        |  To '10'
         |)
       """.stripMargin)
   }
@@ -204,10 +176,6 @@ class TableScanSuite extends DataSourceTest with SharedSQLContext {
     (2 to 10).map(i => Row(i, i - 1)).toSeq)
 
   test("Schema and all fields") {
-    def hiveMetadata(dt: String): Metadata = {
-      new MetadataBuilder().putString(HIVE_TYPE_STRING, dt).build()
-    }
-
     val expectedSchema = StructType(
       StructField("string$%Field", StringType, true) ::
       StructField("binaryField", BinaryType, true) ::
@@ -218,12 +186,11 @@ class TableScanSuite extends DataSourceTest with SharedSQLContext {
       StructField("longField_:,<>=+/~^", LongType, true) ::
       StructField("floatField", FloatType, true) ::
       StructField("doubleField", DoubleType, true) ::
-      StructField("decimalField1", DecimalType.USER_DEFAULT, true) ::
+      StructField("decimalField1", DecimalType.Unlimited, true) ::
       StructField("decimalField2", DecimalType(9, 2), true) ::
       StructField("dateField", DateType, true) ::
       StructField("timestampField", TimestampType, true) ::
-      StructField("varcharField", StringType, true, hiveMetadata("varchar(12)")) ::
-      StructField("charField", StringType, true, hiveMetadata("char(18)")) ::
+      StructField("varcharField", StringType, true) ::
       StructField("arrayFieldSimple", ArrayType(IntegerType), true) ::
       StructField("arrayFieldComplex",
         ArrayType(
@@ -246,36 +213,33 @@ class TableScanSuite extends DataSourceTest with SharedSQLContext {
       Nil
     )
 
-    assert(expectedSchema == spark.table("tableWithSchema").schema)
+    assert(expectedSchema == table("tableWithSchema").schema)
 
-    withSQLConf(SQLConf.SUPPORT_QUOTED_REGEX_COLUMN_NAME.key -> "false") {
-        checkAnswer(
-          sql(
-            """SELECT
-            | `string$%Field`,
-            | cast(binaryField as string),
-            | booleanField,
-            | byteField,
-            | shortField,
-            | int_Field,
-            | `longField_:,<>=+/~^`,
-            | floatField,
-            | doubleField,
-            | decimalField1,
-            | decimalField2,
-            | dateField,
-            | timestampField,
-            | varcharField,
-            | charField,
-            | arrayFieldSimple,
-            | arrayFieldComplex,
-            | mapFieldSimple,
-            | mapFieldComplex,
-            | structFieldSimple,
-            | structFieldComplex FROM tableWithSchema""".stripMargin),
-        tableWithSchemaExpected
-      )
-    }
+    checkAnswer(
+      sql(
+        """SELECT
+          | `string$%Field`,
+          | cast(binaryField as string),
+          | booleanField,
+          | byteField,
+          | shortField,
+          | int_Field,
+          | `longField_:,<>=+/~^`,
+          | floatField,
+          | doubleField,
+          | decimalField1,
+          | decimalField2,
+          | dateField,
+          | timestampField,
+          | varcharField,
+          | arrayFieldSimple,
+          | arrayFieldComplex,
+          | mapFieldSimple,
+          | mapFieldComplex,
+          | structFieldSimple,
+          | structFieldComplex FROM tableWithSchema""".stripMargin),
+      tableWithSchemaExpected
+    )
   }
 
   sqlTest(
@@ -300,11 +264,11 @@ class TableScanSuite extends DataSourceTest with SharedSQLContext {
 
   sqlTest(
     "SELECT structFieldComplex.Value.`value_(2)` FROM tableWithSchema",
-    (1 to 10).map(i => Row(Seq(Date.valueOf(s"1970-01-${i + 1}")))).toSeq)
+    (1 to 10).map(i => Row(Seq(new Date((i + 2) * 8640000)))).toSeq)
 
   test("Caching")  {
     // Cached Query Execution
-    spark.catalog.cacheTable("oneToTen")
+    cacheTable("oneToTen")
     assertCached(sql("SELECT * FROM oneToTen"))
     checkAnswer(
       sql("SELECT * FROM oneToTen"),
@@ -325,21 +289,20 @@ class TableScanSuite extends DataSourceTest with SharedSQLContext {
       sql("SELECT i * 2 FROM oneToTen"),
       (1 to 10).map(i => Row(i * 2)).toSeq)
 
-    assertCached(sql(
-      "SELECT a.i, b.i FROM oneToTen a JOIN oneToTen b ON a.i = b.i + 1"), 2)
-    checkAnswer(sql(
-      "SELECT a.i, b.i FROM oneToTen a JOIN oneToTen b ON a.i = b.i + 1"),
+    assertCached(sql("SELECT a.i, b.i FROM oneToTen a JOIN oneToTen b ON a.i = b.i + 1"), 2)
+    checkAnswer(
+      sql("SELECT a.i, b.i FROM oneToTen a JOIN oneToTen b ON a.i = b.i + 1"),
       (2 to 10).map(i => Row(i, i - 1)).toSeq)
 
     // Verify uncaching
-    spark.catalog.uncacheTable("oneToTen")
+    uncacheTable("oneToTen")
     assertCached(sql("SELECT * FROM oneToTen"), 0)
   }
 
   test("defaultSource") {
     sql(
       """
-        |CREATE TEMPORARY VIEW oneToTenDef
+        |CREATE TEMPORARY TABLE oneToTenDef
         |USING org.apache.spark.sql.sources
         |OPTIONS (
         |  from '1',
@@ -354,69 +317,31 @@ class TableScanSuite extends DataSourceTest with SharedSQLContext {
 
   test("exceptions") {
     // Make sure we do throw correct exception when users use a relation provider that
-    // only implements the RelationProvider or the SchemaRelationProvider.
-    Seq("TEMPORARY VIEW", "TABLE").foreach { tableType =>
-      val schemaNotAllowed = intercept[Exception] {
-        sql(
-          s"""
-             |CREATE $tableType relationProvierWithSchema (i int)
-             |USING org.apache.spark.sql.sources.SimpleScanSource
-             |OPTIONS (
-             |  From '1',
-             |  To '10'
-             |)
-           """.stripMargin)
-      }
-      assert(schemaNotAllowed.getMessage.contains("does not allow user-specified schemas"))
-
-      val schemaNeeded = intercept[Exception] {
-        sql(
-          s"""
-             |CREATE $tableType schemaRelationProvierWithoutSchema
-             |USING org.apache.spark.sql.sources.AllDataTypesScanSource
-             |OPTIONS (
-             |  From '1',
-             |  To '10'
-             |)
-           """.stripMargin)
-      }
-      assert(schemaNeeded.getMessage.contains("A schema needs to be specified when using"))
+    // only implements the RelationProvier or the SchemaRelationProvider.
+    val schemaNotAllowed = intercept[Exception] {
+      sql(
+        """
+          |CREATE TEMPORARY TABLE relationProvierWithSchema (i int)
+          |USING org.apache.spark.sql.sources.SimpleScanSource
+          |OPTIONS (
+          |  From '1',
+          |  To '10'
+          |)
+        """.stripMargin)
     }
-  }
+    assert(schemaNotAllowed.getMessage.contains("does not allow user-specified schemas"))
 
-  test("read the data source tables that do not extend SchemaRelationProvider") {
-    Seq("TEMPORARY VIEW", "TABLE").foreach { tableType =>
-      val tableName = "relationProvierWithSchema"
-      withTable (tableName) {
-        sql(
-          s"""
-             |CREATE $tableType $tableName
-             |USING org.apache.spark.sql.sources.SimpleScanSource
-             |OPTIONS (
-             |  From '1',
-             |  To '10'
-             |)
-           """.stripMargin)
-        checkAnswer(spark.table(tableName), spark.range(1, 11).toDF())
-      }
+    val schemaNeeded = intercept[Exception] {
+      sql(
+        """
+          |CREATE TEMPORARY TABLE schemaRelationProvierWithoutSchema
+          |USING org.apache.spark.sql.sources.AllDataTypesScanSource
+          |OPTIONS (
+          |  From '1',
+          |  To '10'
+          |)
+        """.stripMargin)
     }
-  }
-
-  test("SPARK-5196 schema field with comment") {
-    sql(
-      """
-       |CREATE TEMPORARY VIEW student(name string comment "SN", age int comment "SA", grade int)
-       |USING org.apache.spark.sql.sources.AllDataTypesScanSource
-       |OPTIONS (
-       |  from '1',
-       |  to '10',
-       |  option_with_underscores 'someval',
-       |  option.with.dots 'someval'
-       |)
-       """.stripMargin)
-
-    val planned = sql("SELECT * FROM student").queryExecution.executedPlan
-    val comments = planned.schema.fields.map(_.getComment().getOrElse("NO_COMMENT")).mkString(",")
-    assert(comments === "SN,SA,NO_COMMENT")
+    assert(schemaNeeded.getMessage.contains("A schema needs to be specified when using"))
   }
 }

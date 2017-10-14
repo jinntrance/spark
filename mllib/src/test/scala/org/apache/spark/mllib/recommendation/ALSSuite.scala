@@ -17,28 +17,30 @@
 
 package org.apache.spark.mllib.recommendation
 
-import scala.collection.JavaConverters._
+import scala.collection.JavaConversions._
 import scala.math.abs
 import scala.util.Random
 
-import breeze.linalg.{DenseMatrix => BDM}
+import org.scalatest.FunSuite
+import org.jblas.DoubleMatrix
 
-import org.apache.spark.SparkFunSuite
+import org.apache.spark.SparkContext._
 import org.apache.spark.mllib.util.MLlibTestSparkContext
+import org.apache.spark.mllib.recommendation.ALS.BlockStats
 import org.apache.spark.storage.StorageLevel
 
 object ALSSuite {
 
-  def generateRatingsAsJava(
+  def generateRatingsAsJavaList(
       users: Int,
       products: Int,
       features: Int,
       samplingRate: Double,
       implicitPrefs: Boolean,
-      negativeWeights: Boolean): (java.util.List[Rating], Array[Double], Array[Double]) = {
+      negativeWeights: Boolean): (java.util.List[Rating], DoubleMatrix, DoubleMatrix) = {
     val (sampledRatings, trueRatings, truePrefs) =
-      generateRatings(users, products, features, samplingRate, implicitPrefs, negativeWeights)
-    (sampledRatings.asJava, trueRatings.toArray, if (truePrefs == null) null else truePrefs.toArray)
+      generateRatings(users, products, features, samplingRate, implicitPrefs)
+    (seqAsJavaList(sampledRatings), trueRatings, truePrefs)
   }
 
   def generateRatings(
@@ -48,36 +50,35 @@ object ALSSuite {
       samplingRate: Double,
       implicitPrefs: Boolean = false,
       negativeWeights: Boolean = false,
-      negativeFactors: Boolean = true): (Seq[Rating], BDM[Double], BDM[Double]) = {
+      negativeFactors: Boolean = true): (Seq[Rating], DoubleMatrix, DoubleMatrix) = {
     val rand = new Random(42)
 
     // Create a random matrix with uniform values from -1 to 1
     def randomMatrix(m: Int, n: Int) = {
       if (negativeFactors) {
-        new BDM(m, n, Array.fill(m * n)(rand.nextDouble() * 2 - 1))
+        new DoubleMatrix(m, n, Array.fill(m * n)(rand.nextDouble() * 2 - 1): _*)
       } else {
-        new BDM(m, n, Array.fill(m * n)(rand.nextDouble()))
+        new DoubleMatrix(m, n, Array.fill(m * n)(rand.nextDouble()): _*)
       }
     }
 
     val userMatrix = randomMatrix(users, features)
     val productMatrix = randomMatrix(features, products)
-    val (trueRatings, truePrefs) =
-      if (implicitPrefs) {
+    val (trueRatings, truePrefs) = implicitPrefs match {
+      case true =>
         // Generate raw values from [0,9], or if negativeWeights, from [-2,7]
-        val raw = new BDM(users, products,
+        val raw = new DoubleMatrix(users, products,
           Array.fill(users * products)(
-            (if (negativeWeights) -2 else 0) + rand.nextInt(10).toDouble))
+            (if (negativeWeights) -2 else 0) + rand.nextInt(10).toDouble): _*)
         val prefs =
-          new BDM(users, products, raw.data.map(v => if (v > 0) 1.0 else 0.0))
+          new DoubleMatrix(users, products, raw.data.map(v => if (v > 0) 1.0 else 0.0): _*)
         (raw, prefs)
-      } else {
-        (userMatrix * productMatrix, null)
-      }
+      case false => (userMatrix.mmul(productMatrix), null)
+    }
 
     val sampledRatings = {
       for (u <- 0 until users; p <- 0 until products if rand.nextDouble() < samplingRate)
-        yield Rating(u, p, trueRatings(u, p))
+        yield Rating(u, p, trueRatings.get(u, p))
     }
 
     (sampledRatings, trueRatings, truePrefs)
@@ -85,7 +86,7 @@ object ALSSuite {
 }
 
 
-class ALSSuite extends SparkFunSuite with MLlibTestSparkContext {
+class ALSSuite extends FunSuite with MLlibTestSparkContext {
 
   test("rank-1 matrices") {
     testALS(50, 100, 1, 15, 0.7, 0.3)
@@ -150,8 +151,8 @@ class ALSSuite extends SparkFunSuite with MLlibTestSparkContext {
       .setSeed(1)
       .setFinalRDDStorageLevel(storageLevel)
       .run(ratings)
-    assert(model.productFeatures.getStorageLevel == storageLevel)
-    assert(model.userFeatures.getStorageLevel == storageLevel)
+    assert(model.productFeatures.getStorageLevel == storageLevel);
+    assert(model.userFeatures.getStorageLevel == storageLevel);
     storageLevel = StorageLevel.DISK_ONLY
     model = new ALS()
       .setRank(5)
@@ -161,8 +162,8 @@ class ALSSuite extends SparkFunSuite with MLlibTestSparkContext {
       .setSeed(1)
       .setFinalRDDStorageLevel(storageLevel)
       .run(ratings)
-    assert(model.productFeatures.getStorageLevel == storageLevel)
-    assert(model.userFeatures.getStorageLevel == storageLevel)
+    assert(model.productFeatures.getStorageLevel == storageLevel);
+    assert(model.userFeatures.getStorageLevel == storageLevel);
   }
 
   test("negative ids") {
@@ -179,7 +180,7 @@ class ALSSuite extends SparkFunSuite with MLlibTestSparkContext {
       val u = r.user + 25
       val p = r.product + 25
       val v = r.rating
-      val error = v - correct(u, p)
+      val error = v - correct.get(u, p)
       assert(math.abs(error) < 0.4)
     }
   }
@@ -188,12 +189,21 @@ class ALSSuite extends SparkFunSuite with MLlibTestSparkContext {
     testALS(100, 200, 2, 15, 0.7, 0.4, false, false, false, -1, -1, false)
   }
 
-  test("SPARK-18268: ALS with empty RDD should fail with better message") {
-    val ratings = sc.parallelize(Array.empty[Rating])
-    intercept[IllegalArgumentException] {
-      new ALS().run(ratings)
-    }
+  test("analyze one user block and one product block") {
+    val localRatings = Seq(
+      Rating(0, 100, 1.0),
+      Rating(0, 101, 2.0),
+      Rating(0, 102, 3.0),
+      Rating(1, 102, 4.0),
+      Rating(2, 103, 5.0))
+    val ratings = sc.makeRDD(localRatings, 2)
+    val stats = ALS.analyzeBlocks(ratings, 1, 1)
+    assert(stats.size === 2)
+    assert(stats(0) === BlockStats("user", 0, 3, 5, 4, 3))
+    assert(stats(1) === BlockStats("product", 0, 4, 5, 3, 4))
   }
+
+  // TODO: add tests for analyzing multiple user/product blocks
 
   /**
    * Test if we can correctly factorize R = U * P where U and P are of known rank.
@@ -205,13 +215,12 @@ class ALSSuite extends SparkFunSuite with MLlibTestSparkContext {
    * @param samplingRate what fraction of the user-product pairs are known
    * @param matchThreshold max difference allowed to consider a predicted rating correct
    * @param implicitPrefs flag to test implicit feedback
-   * @param bulkPredict flag to test bulk prediction
+   * @param bulkPredict flag to test bulk predicition
    * @param negativeWeights whether the generated data can contain negative values
    * @param numUserBlocks number of user blocks to partition users into
    * @param numProductBlocks number of product blocks to partition products into
    * @param negativeFactors whether the generated user/product factors can have negative entries
    */
-  // scalastyle:off
   def testALS(
       users: Int,
       products: Int,
@@ -225,8 +234,6 @@ class ALSSuite extends SparkFunSuite with MLlibTestSparkContext {
       numUserBlocks: Int = -1,
       numProductBlocks: Int = -1,
       negativeFactors: Boolean = true) {
-    // scalastyle:on
-
     val (sampledRatings, trueRatings, truePrefs) = ALSSuite.generateRatings(users, products,
       features, samplingRate, implicitPrefs, negativeWeights, negativeFactors)
 
@@ -242,31 +249,30 @@ class ALSSuite extends SparkFunSuite with MLlibTestSparkContext {
       .setNonnegative(!negativeFactors)
       .run(sc.parallelize(sampledRatings))
 
-    val predictedU = new BDM[Double](users, features)
+    val predictedU = new DoubleMatrix(users, features)
     for ((u, vec) <- model.userFeatures.collect(); i <- 0 until features) {
-      predictedU(u, i) = vec(i)
+      predictedU.put(u, i, vec(i))
     }
-    val predictedP = new BDM[Double](products, features)
+    val predictedP = new DoubleMatrix(products, features)
     for ((p, vec) <- model.productFeatures.collect(); i <- 0 until features) {
-      predictedP(p, i) = vec(i)
+      predictedP.put(p, i, vec(i))
     }
-    val predictedRatings =
-      if (bulkPredict) {
-        val allRatings = new BDM[Double](users, products)
+    val predictedRatings = bulkPredict match {
+      case false => predictedU.mmul(predictedP.transpose)
+      case true =>
+        val allRatings = new DoubleMatrix(users, products)
         val usersProducts = for (u <- 0 until users; p <- 0 until products) yield (u, p)
         val userProductsRDD = sc.parallelize(usersProducts)
         model.predict(userProductsRDD).collect().foreach { elem =>
-          allRatings(elem.user, elem.product) = elem.rating
+          allRatings.put(elem.user, elem.product, elem.rating)
         }
         allRatings
-      } else {
-        predictedU * predictedP.t
-      }
+    }
 
     if (!implicitPrefs) {
       for (u <- 0 until users; p <- 0 until products) {
-        val prediction = predictedRatings(u, p)
-        val correct = trueRatings(u, p)
+        val prediction = predictedRatings.get(u, p)
+        val correct = trueRatings.get(u, p)
         if (math.abs(prediction - correct) > matchThreshold) {
           fail(("Model failed to predict (%d, %d): %f vs %f\ncorr: %s\npred: %s\nU: %s\n P: %s")
             .format(u, p, correct, prediction, trueRatings, predictedRatings, predictedU,
@@ -278,9 +284,9 @@ class ALSSuite extends SparkFunSuite with MLlibTestSparkContext {
       var sqErr = 0.0
       var denom = 0.0
       for (u <- 0 until users; p <- 0 until products) {
-        val prediction = predictedRatings(u, p)
-        val truePref = truePrefs(u, p)
-        val confidence = 1.0 + abs(trueRatings(u, p))
+        val prediction = predictedRatings.get(u, p)
+        val truePref = truePrefs.get(u, p)
+        val confidence = 1 + 1.0 * abs(trueRatings.get(u, p))
         val err = confidence * (truePref - prediction) * (truePref - prediction)
         sqErr += err
         denom += confidence

@@ -17,161 +17,113 @@
 
 package org.apache.spark.sql.execution
 
-import java.util.Collections
+import scala.collection.mutable.HashSet
 
-import scala.collection.JavaConverters._
-
-import org.apache.spark.internal.Logging
-import org.apache.spark.rdd.RDD
-import org.apache.spark.sql._
-import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.expressions.Attribute
-import org.apache.spark.sql.catalyst.expressions.codegen.{CodeFormatter, CodegenContext, ExprCode}
-import org.apache.spark.sql.catalyst.plans.physical.Partitioning
+import org.apache.spark.{AccumulatorParam, Accumulator, SparkContext}
+import org.apache.spark.annotation.DeveloperApi
+import org.apache.spark.SparkContext._
+import org.apache.spark.sql.{DataFrame, Row}
 import org.apache.spark.sql.catalyst.trees.TreeNodeRef
-import org.apache.spark.util.{AccumulatorV2, LongAccumulator}
+import org.apache.spark.sql.types._
 
 /**
+ * :: DeveloperApi ::
  * Contains methods for debugging query execution.
  *
  * Usage:
  * {{{
- *   import org.apache.spark.sql.execution.debug._
- *   sql("SELECT 1").debug()
- *   sql("SELECT 1").debugCodegen()
+ *   sql("SELECT key FROM src").debug
  * }}}
  */
 package object debug {
 
-  /** Helper function to evade the println() linter. */
-  private def debugPrint(msg: String): Unit = {
-    // scalastyle:off println
-    println(msg)
-    // scalastyle:on println
-  }
-
   /**
-   * Get WholeStageCodegenExec subtrees and the codegen in a query plan into one String
-   *
-   * @param plan the query plan for codegen
-   * @return single String containing all WholeStageCodegen subtrees and corresponding codegen
+   * :: DeveloperApi ::
+   * Augments [[DataFrame]]s with debug methods.
    */
-  def codegenString(plan: SparkPlan): String = {
-    val codegenSeq = codegenStringSeq(plan)
-    var output = s"Found ${codegenSeq.size} WholeStageCodegen subtrees.\n"
-    for (((subtree, code), i) <- codegenSeq.zipWithIndex) {
-      output += s"== Subtree ${i + 1} / ${codegenSeq.size} ==\n"
-      output += subtree
-      output += "\nGenerated code:\n"
-      output += s"${code}\n"
-    }
-    output
-  }
-
-  /**
-   * Get WholeStageCodegenExec subtrees and the codegen in a query plan
-   *
-   * @param plan the query plan for codegen
-   * @return Sequence of WholeStageCodegen subtrees and corresponding codegen
-   */
-  def codegenStringSeq(plan: SparkPlan): Seq[(String, String)] = {
-    val codegenSubtrees = new collection.mutable.HashSet[WholeStageCodegenExec]()
-    plan transform {
-      case s: WholeStageCodegenExec =>
-        codegenSubtrees += s
-        s
-      case s => s
-    }
-    codegenSubtrees.toSeq.map { subtree =>
-      val (_, source) = subtree.doCodeGen()
-      (subtree.toString, CodeFormatter.format(source))
-    }
-  }
-
-  /**
-   * Augments [[Dataset]]s with debug methods.
-   */
-  implicit class DebugQuery(query: Dataset[_]) extends Logging {
+  @DeveloperApi
+  implicit class DebugQuery(query: DataFrame) {
     def debug(): Unit = {
       val plan = query.queryExecution.executedPlan
       val visited = new collection.mutable.HashSet[TreeNodeRef]()
       val debugPlan = plan transform {
         case s: SparkPlan if !visited.contains(new TreeNodeRef(s)) =>
           visited += new TreeNodeRef(s)
-          DebugExec(s)
+          DebugNode(s)
       }
-      debugPrint(s"Results returned: ${debugPlan.execute().count()}")
+      println(s"Results returned: ${debugPlan.execute().count()}")
       debugPlan.foreach {
-        case d: DebugExec => d.dumpStats()
+        case d: DebugNode => d.dumpStats()
         case _ =>
       }
     }
 
-    /**
-     * Prints to stdout all the generated code found in this plan (i.e. the output of each
-     * WholeStageCodegen subtree).
-     */
-    def debugCodegen(): Unit = {
-      debugPrint(codegenString(query.queryExecution.executedPlan))
+    def typeCheck(): Unit = {
+      val plan = query.queryExecution.executedPlan
+      val visited = new collection.mutable.HashSet[TreeNodeRef]()
+      val debugPlan = plan transform {
+        case s: SparkPlan if !visited.contains(new TreeNodeRef(s)) =>
+          visited += new TreeNodeRef(s)
+          TypeCheck(s)
+      }
+      try {
+        println(s"Results returned: ${debugPlan.execute().count()}")
+      } catch {
+        case e: Exception =>
+          def unwrap(e: Throwable): Throwable = if (e.getCause == null) e else unwrap(e.getCause)
+          println(s"Deepest Error: ${unwrap(e)}")
+      }
     }
   }
 
-  case class DebugExec(child: SparkPlan) extends UnaryExecNode with CodegenSupport {
-    def output: Seq[Attribute] = child.output
+  private[sql] case class DebugNode(child: SparkPlan) extends UnaryNode {
+    def output = child.output
 
-    class SetAccumulator[T] extends AccumulatorV2[T, java.util.Set[T]] {
-      private val _set = Collections.synchronizedSet(new java.util.HashSet[T]())
-      override def isZero: Boolean = _set.isEmpty
-      override def copy(): AccumulatorV2[T, java.util.Set[T]] = {
-        val newAcc = new SetAccumulator[T]()
-        newAcc._set.addAll(_set)
-        newAcc
+    implicit object SetAccumulatorParam extends AccumulatorParam[HashSet[String]] {
+      def zero(initialValue: HashSet[String]): HashSet[String] = {
+        initialValue.clear()
+        initialValue
       }
-      override def reset(): Unit = _set.clear()
-      override def add(v: T): Unit = _set.add(v)
-      override def merge(other: AccumulatorV2[T, java.util.Set[T]]): Unit = {
-        _set.addAll(other.value)
+
+      def addInPlace(v1: HashSet[String], v2: HashSet[String]): HashSet[String] = {
+        v1 ++= v2
+        v1
       }
-      override def value: java.util.Set[T] = _set
     }
 
     /**
      * A collection of metrics for each column of output.
+     * @param elementTypes the actual runtime types for the output.  Useful when there are bugs
+     *        causing the wrong data to be projected.
      */
-    case class ColumnMetrics() {
-      val elementTypes = new SetAccumulator[String]
-      sparkContext.register(elementTypes)
-    }
+    case class ColumnMetrics(
+        elementTypes: Accumulator[HashSet[String]] = sparkContext.accumulator(HashSet.empty))
+    val tupleCount = sparkContext.accumulator[Int](0)
 
-    val tupleCount: LongAccumulator = sparkContext.longAccumulator
-
-    val numColumns: Int = child.output.size
-    val columnStats: Array[ColumnMetrics] = Array.fill(child.output.size)(new ColumnMetrics())
+    val numColumns = child.output.size
+    val columnStats = Array.fill(child.output.size)(new ColumnMetrics())
 
     def dumpStats(): Unit = {
-      debugPrint(s"== ${child.simpleString} ==")
-      debugPrint(s"Tuples output: ${tupleCount.value}")
-      child.output.zip(columnStats).foreach { case (attr, metric) =>
-        // This is called on driver. All accumulator updates have a fixed value. So it's safe to use
-        // `asScala` which accesses the internal values using `java.util.Iterator`.
-        val actualDataTypes = metric.elementTypes.value.asScala.mkString("{", ",", "}")
-        debugPrint(s" ${attr.name} ${attr.dataType}: $actualDataTypes")
+      println(s"== ${child.simpleString} ==")
+      println(s"Tuples output: ${tupleCount.value}")
+      child.output.zip(columnStats).foreach { case(attr, metric) =>
+        val actualDataTypes = metric.elementTypes.value.mkString("{", ",", "}")
+        println(s" ${attr.name} ${attr.dataType}: $actualDataTypes")
       }
     }
 
-    protected override def doExecute(): RDD[InternalRow] = {
+    def execute() = {
       child.execute().mapPartitions { iter =>
-        new Iterator[InternalRow] {
-          def hasNext: Boolean = iter.hasNext
-
-          def next(): InternalRow = {
+        new Iterator[Row] {
+          def hasNext = iter.hasNext
+          def next() = {
             val currentRow = iter.next()
-            tupleCount.add(1)
+            tupleCount += 1
             var i = 0
             while (i < numColumns) {
-              val value = currentRow.get(i, output(i).dataType)
+              val value = currentRow(i)
               if (value != null) {
-                columnStats(i).elementTypes.add(value.getClass.getName)
+                columnStats(i).elementTypes += HashSet(value.getClass.getName)
               }
               i += 1
             }
@@ -180,19 +132,72 @@ package object debug {
         }
       }
     }
+  }
 
-    override def outputPartitioning: Partitioning = child.outputPartitioning
+  /**
+   * :: DeveloperApi ::
+   * Helper functions for checking that runtime types match a given schema.
+   */
+  @DeveloperApi
+  object TypeCheck {
+    def typeCheck(data: Any, schema: DataType): Unit = (data, schema) match {
+      case (null, _) =>
 
-    override def inputRDDs(): Seq[RDD[InternalRow]] = {
-      child.asInstanceOf[CodegenSupport].inputRDDs()
+      case (row: Row, StructType(fields)) =>
+        row.toSeq.zip(fields.map(_.dataType)).foreach { case(d, t) => typeCheck(d, t) }
+      case (s: Seq[_], ArrayType(elemType, _)) =>
+        s.foreach(typeCheck(_, elemType))
+      case (m: Map[_, _], MapType(keyType, valueType, _)) =>
+        m.keys.foreach(typeCheck(_, keyType))
+        m.values.foreach(typeCheck(_, valueType))
+
+      case (_: Long, LongType) =>
+      case (_: Int, IntegerType) =>
+      case (_: String, StringType) =>
+      case (_: Float, FloatType) =>
+      case (_: Byte, ByteType) =>
+      case (_: Short, ShortType) =>
+      case (_: Boolean, BooleanType) =>
+      case (_: Double, DoubleType) =>
+
+      case (d, t) => sys.error(s"Invalid data found: got $d (${d.getClass}) expected $t")
     }
+  }
 
-    override def doProduce(ctx: CodegenContext): String = {
-      child.asInstanceOf[CodegenSupport].produce(ctx, this)
-    }
+  /**
+   * :: DeveloperApi ::
+   * Augments [[DataFrame]]s with debug methods.
+   */
+  @DeveloperApi
+  private[sql] case class TypeCheck(child: SparkPlan) extends SparkPlan {
+    import TypeCheck._
 
-    override def doConsume(ctx: CodegenContext, input: Seq[ExprCode], row: ExprCode): String = {
-      consume(ctx, input)
+    override def nodeName  = ""
+
+    /* Only required when defining this class in a REPL.
+    override def makeCopy(args: Array[Object]): this.type =
+      TypeCheck(args(0).asInstanceOf[SparkPlan]).asInstanceOf[this.type]
+    */
+
+    def output = child.output
+
+    def children = child :: Nil
+
+    def execute() = {
+      child.execute().map { row =>
+        try typeCheck(row, child.schema) catch {
+          case e: Exception =>
+            sys.error(
+              s"""
+                  |ERROR WHEN TYPE CHECKING QUERY
+                  |==============================
+                  |$e
+                  |======== BAD TREE ============
+                  |$child
+             """.stripMargin)
+        }
+        row
+      }
     }
   }
 }

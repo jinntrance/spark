@@ -22,7 +22,6 @@ import java.io.Serializable;
 /**
  *  A function that returns Doubles, and can be used to construct DoubleRDDs.
  */
-@FunctionalInterface
 public interface DoubleFunction<T> extends Serializable {
-  double call(T t) throws Exception;
+  public double call(T t) throws Exception;
 }

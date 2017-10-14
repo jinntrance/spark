@@ -20,21 +20,21 @@ package org.apache.spark.ml.tuning
 import scala.annotation.varargs
 import scala.collection.mutable
 
-import org.apache.spark.annotation.Since
+import org.apache.spark.annotation.AlphaComponent
 import org.apache.spark.ml.param._
 
 /**
+ * :: AlphaComponent ::
  * Builder for a param grid used in grid search-based model selection.
  */
-@Since("1.2.0")
-class ParamGridBuilder @Since("1.2.0") {
+@AlphaComponent
+class ParamGridBuilder {
 
   private val paramGrid = mutable.Map.empty[Param[_], Iterable[_]]
 
   /**
    * Sets the given parameters in this grid to fixed values.
    */
-  @Since("1.2.0")
   def baseOn(paramMap: ParamMap): this.type = {
     baseOn(paramMap.toSeq: _*)
     this
@@ -43,7 +43,6 @@ class ParamGridBuilder @Since("1.2.0") {
   /**
    * Sets the given parameters in this grid to fixed values.
    */
-  @Since("1.2.0")
   @varargs
   def baseOn(paramPairs: ParamPair[_]*): this.type = {
     paramPairs.foreach { p =>
@@ -55,7 +54,6 @@ class ParamGridBuilder @Since("1.2.0") {
   /**
    * Adds a param with multiple values (overwrites if the input param exists).
    */
-  @Since("1.2.0")
   def addGrid[T](param: Param[T], values: Iterable[T]): this.type = {
     paramGrid.put(param, values)
     this
@@ -66,15 +64,13 @@ class ParamGridBuilder @Since("1.2.0") {
   /**
    * Adds a double param with multiple values.
    */
-  @Since("1.2.0")
   def addGrid(param: DoubleParam, values: Array[Double]): this.type = {
     addGrid[Double](param, values)
   }
 
   /**
-   * Adds an int param with multiple values.
+   * Adds a int param with multiple values.
    */
-  @Since("1.2.0")
   def addGrid(param: IntParam, values: Array[Int]): this.type = {
     addGrid[Int](param, values)
   }
@@ -82,7 +78,6 @@ class ParamGridBuilder @Since("1.2.0") {
   /**
    * Adds a float param with multiple values.
    */
-  @Since("1.2.0")
   def addGrid(param: FloatParam, values: Array[Float]): this.type = {
     addGrid[Float](param, values)
   }
@@ -90,7 +85,6 @@ class ParamGridBuilder @Since("1.2.0") {
   /**
    * Adds a long param with multiple values.
    */
-  @Since("1.2.0")
   def addGrid(param: LongParam, values: Array[Long]): this.type = {
     addGrid[Long](param, values)
   }
@@ -98,7 +92,6 @@ class ParamGridBuilder @Since("1.2.0") {
   /**
    * Adds a boolean param with true and false.
    */
-  @Since("1.2.0")
   def addGrid(param: BooleanParam): this.type = {
     addGrid[Boolean](param, Array(true, false))
   }
@@ -106,7 +99,6 @@ class ParamGridBuilder @Since("1.2.0") {
   /**
    * Builds and returns all combinations of parameters specified by the param grid.
    */
-  @Since("1.2.0")
   def build(): Array[ParamMap] = {
     var paramMaps = Array(new ParamMap)
     paramGrid.foreach { case (param, values) =>

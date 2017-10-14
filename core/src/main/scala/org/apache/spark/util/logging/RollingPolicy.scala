@@ -18,9 +18,9 @@
 package org.apache.spark.util.logging
 
 import java.text.SimpleDateFormat
-import java.util.{Calendar, Locale}
+import java.util.Calendar
 
-import org.apache.spark.internal.Logging
+import org.apache.spark.Logging
 
 /**
  * Defines the policy based on which [[org.apache.spark.util.logging.RollingFileAppender]] will
@@ -32,10 +32,10 @@ private[spark] trait RollingPolicy {
   def shouldRollover(bytesToBeWritten: Long): Boolean
 
   /** Notify that rollover has occurred */
-  def rolledOver(): Unit
+  def rolledOver()
 
   /** Notify that bytes have been written */
-  def bytesWritten(bytes: Long): Unit
+  def bytesWritten(bytes: Long)
 
   /** Get the desired name of the rollover file */
   def generateRolledOverFileSuffix(): String
@@ -59,7 +59,7 @@ private[spark] class TimeBasedRollingPolicy(
   }
 
   @volatile private var nextRolloverTime = calculateNextRolloverTime()
-  private val formatter = new SimpleDateFormat(rollingFileSuffixPattern, Locale.US)
+  private val formatter = new SimpleDateFormat(rollingFileSuffixPattern)
 
   /** Should rollover if current time has exceeded next rollover time */
   def shouldRollover(bytesToBeWritten: Long): Boolean = {
@@ -109,11 +109,11 @@ private[spark] class SizeBasedRollingPolicy(
   }
 
   @volatile private var bytesWrittenSinceRollover = 0L
-  val formatter = new SimpleDateFormat("--yyyy-MM-dd--HH-mm-ss--SSSS", Locale.US)
+  val formatter = new SimpleDateFormat("--yyyy-MM-dd--HH-mm-ss--SSSS")
 
   /** Should rollover if the next set of bytes is going to exceed the size limit */
   def shouldRollover(bytesToBeWritten: Long): Boolean = {
-    logDebug(s"$bytesToBeWritten + $bytesWrittenSinceRollover > $rolloverSizeBytes")
+    logInfo(s"$bytesToBeWritten + $bytesWrittenSinceRollover > $rolloverSizeBytes")
     bytesToBeWritten + bytesWrittenSinceRollover > rolloverSizeBytes
   }
 

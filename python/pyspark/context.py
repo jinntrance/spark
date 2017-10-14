@@ -15,18 +15,11 @@
 # limitations under the License.
 #
 
-from __future__ import print_function
-
 import os
 import shutil
-import signal
 import sys
-import threading
-import warnings
-from threading import RLock
+from threading import Lock
 from tempfile import NamedTemporaryFile
-
-from py4j.protocol import Py4JError
 
 from pyspark import accumulators
 from pyspark.accumulators import Accumulator
@@ -37,13 +30,11 @@ from pyspark.java_gateway import launch_gateway
 from pyspark.serializers import PickleSerializer, BatchedSerializer, UTF8Deserializer, \
     PairDeserializer, AutoBatchedSerializer, NoOpSerializer
 from pyspark.storagelevel import StorageLevel
-from pyspark.rdd import RDD, _load_from_socket, ignore_unicode_prefix
+from pyspark.rdd import RDD
 from pyspark.traceback_utils import CallSite, first_spark_call
-from pyspark.status import StatusTracker
 from pyspark.profiler import ProfilerCollector, BasicProfiler
 
-if sys.version > '3':
-    xrange = range
+from py4j.java_collections import ListConverter
 
 
 __all__ = ['SparkContext']
@@ -67,12 +58,11 @@ class SparkContext(object):
 
     _gateway = None
     _jvm = None
+    _writeToFile = None
     _next_accum_id = 0
     _active_spark_context = None
-    _lock = RLock()
+    _lock = Lock()
     _python_includes = None  # zip and egg files that need to be added to PYTHONPATH
-
-    PACKAGE_EXTENSIONS = ('.zip', '.egg', '.jar')
 
     def __init__(self, master=None, appName=None, sparkHome=None, pyFiles=None,
                  environment=None, batchSize=0, serializer=PickleSerializer(), conf=None,
@@ -112,7 +102,7 @@ class SparkContext(object):
         ValueError:...
         """
         self._callsite = first_spark_call() or CallSite(None, None, None)
-        SparkContext._ensure_initialized(self, gateway=gateway, conf=conf)
+        SparkContext._ensure_initialized(self, gateway=gateway)
         try:
             self._do_init(master, appName, sparkHome, pyFiles, environment, batchSize, serializer,
                           conf, jsc, profiler_cls)
@@ -124,18 +114,7 @@ class SparkContext(object):
     def _do_init(self, master, appName, sparkHome, pyFiles, environment, batchSize, serializer,
                  conf, jsc, profiler_cls):
         self.environment = environment or {}
-        # java gateway must have been launched at this point.
-        if conf is not None and conf._jconf is not None:
-            # conf has been initialized in JVM properly, so use conf directly. This represent the
-            # scenario that JVM has been launched before SparkConf is created (e.g. SparkContext is
-            # created and then stopped, and we create a new SparkConf and new SparkContext again)
-            self._conf = conf
-        else:
-            self._conf = SparkConf(_jvm=SparkContext._jvm)
-            if conf is not None:
-                for k, v in conf.getAll():
-                    self._conf.set(k, v)
-
+        self._conf = conf or SparkConf(_jvm=self._jvm)
         self._batchSize = batchSize  # -1 represents an unlimited batch size
         self._unbatched_serializer = serializer
         if batchSize == 0:
@@ -152,7 +131,7 @@ class SparkContext(object):
         if sparkHome:
             self._conf.setSparkHome(sparkHome)
         if environment:
-            for key, value in environment.items():
+            for key, value in environment.iteritems():
                 self._conf.setExecutorEnv(key, value)
         for key, value in DEFAULT_CONFIGS.items():
             self._conf.setIfMissing(key, value)
@@ -168,28 +147,23 @@ class SparkContext(object):
         self.master = self._conf.get("spark.master")
         self.appName = self._conf.get("spark.app.name")
         self.sparkHome = self._conf.get("spark.home", None)
-
         for (k, v) in self._conf.getAll():
             if k.startswith("spark.executorEnv."):
                 varName = k[len("spark.executorEnv."):]
                 self.environment[varName] = v
 
-        self.environment["PYTHONHASHSEED"] = os.environ.get("PYTHONHASHSEED", "0")
-
         # Create the Java SparkContext through Py4J
         self._jsc = jsc or self._initialize_context(self._conf._jconf)
-        # Reset the SparkConf to the one actually used by the SparkContext in JVM.
-        self._conf = SparkConf(_jconf=self._jsc.sc().conf())
 
         # Create a single Accumulator in Java that we'll send all our updates through;
         # they will be passed back to us through a TCP server
         self._accumulatorServer = accumulators._start_update_server()
         (host, port) = self._accumulatorServer.server_address
-        self._javaAccumulator = self._jvm.PythonAccumulatorV2(host, port)
-        self._jsc.sc().register(self._javaAccumulator)
+        self._javaAccumulator = self._jsc.accumulator(
+            self._jvm.java.util.ArrayList(),
+            self._jvm.PythonAccumulatorParam(host, port))
 
         self.pythonExec = os.environ.get("PYSPARK_PYTHON", 'python')
-        self.pythonVer = "%d.%d" % sys.version_info[:2]
 
         # Broadcast's __reduce__ method stores Broadcast instances here.
         # This allows other code to determine which Broadcast instances have
@@ -211,15 +185,14 @@ class SparkContext(object):
         for path in self._conf.get("spark.submit.pyFiles", "").split(","):
             if path != "":
                 (dirname, filename) = os.path.split(path)
-                if filename[-4:].lower() in self.PACKAGE_EXTENSIONS:
+                if filename.lower().endswith("zip") or filename.lower().endswith("egg"):
                     self._python_includes.append(filename)
                     sys.path.insert(1, os.path.join(SparkFiles.getRootDirectory(), filename))
 
         # Create a temporary directory inside spark.local.dir:
         local_dir = self._jvm.org.apache.spark.util.Utils.getLocalDir(self._jsc.sc().conf())
         self._temp_dir = \
-            self._jvm.org.apache.spark.util.Utils.createTempDir(local_dir, "pyspark") \
-                .getAbsolutePath()
+            self._jvm.org.apache.spark.util.Utils.createTempDir(local_dir).getAbsolutePath()
 
         # profiling stats collected for each PythonRDD
         if self._conf.get("spark.python.profile", "false") == "true":
@@ -228,41 +201,6 @@ class SparkContext(object):
         else:
             self.profiler_collector = None
 
-        # create a signal handler which would be invoked on receiving SIGINT
-        def signal_handler(signal, frame):
-            self.cancelAllJobs()
-            raise KeyboardInterrupt()
-
-        # see http://stackoverflow.com/questions/23206787/
-        if isinstance(threading.current_thread(), threading._MainThread):
-            signal.signal(signal.SIGINT, signal_handler)
-
-    def __repr__(self):
-        return "<SparkContext master={master} appName={appName}>".format(
-            master=self.master,
-            appName=self.appName,
-        )
-
-    def _repr_html_(self):
-        return """
-        <div>
-            <p><b>SparkContext</b></p>
-
-            <p><a href="{sc.uiWebUrl}">Spark UI</a></p>
-
-            <dl>
-              <dt>Version</dt>
-                <dd><code>v{sc.version}</code></dd>
-              <dt>Master</dt>
-                <dd><code>{sc.master}</code></dd>
-              <dt>AppName</dt>
-                <dd><code>{sc.appName}</code></dd>
-            </dl>
-        </div>
-        """.format(
-            sc=self
-        )
-
     def _initialize_context(self, jconf):
         """
         Initialize SparkContext in function to allow subclass specific initialization
@@ -270,15 +208,16 @@ class SparkContext(object):
         return self._jvm.JavaSparkContext(jconf)
 
     @classmethod
-    def _ensure_initialized(cls, instance=None, gateway=None, conf=None):
+    def _ensure_initialized(cls, instance=None, gateway=None):
         """
         Checks whether a SparkContext is initialized or not.
         Throws error if a SparkContext is already running.
         """
         with SparkContext._lock:
             if not SparkContext._gateway:
-                SparkContext._gateway = gateway or launch_gateway(conf)
+                SparkContext._gateway = gateway or launch_gateway()
                 SparkContext._jvm = SparkContext._gateway.jvm
+                SparkContext._writeToFile = SparkContext._jvm.PythonRDD.writeToFile
 
             if instance:
                 if (SparkContext._active_spark_context and
@@ -301,7 +240,7 @@ class SparkContext(object):
         # This method is called when attempting to pickle SparkContext, which is always an error:
         raise Exception(
             "It appears that you are attempting to reference SparkContext from a broadcast "
-            "variable, action, or transformation. SparkContext can only be used on the driver, "
+            "variable, action, or transforamtion. SparkContext can only be used on the driver, "
             "not in code that it run on workers. For more information, see SPARK-5063."
         )
 
@@ -320,25 +259,6 @@ class SparkContext(object):
         self.stop()
 
     @classmethod
-    def getOrCreate(cls, conf=None):
-        """
-        Get or instantiate a SparkContext and register it as a singleton object.
-
-        :param conf: SparkConf (optional)
-        """
-        with SparkContext._lock:
-            if SparkContext._active_spark_context is None:
-                SparkContext(conf=conf or SparkConf())
-            return SparkContext._active_spark_context
-
-    def setLogLevel(self, logLevel):
-        """
-        Control our logLevel. This overrides any user-defined log settings.
-        Valid log levels include: ALL, DEBUG, ERROR, FATAL, INFO, OFF, TRACE, WARN
-        """
-        self._jsc.setLogLevel(logLevel)
-
-    @classmethod
     def setSystemProperty(cls, key, value):
         """
         Set a Java system property, such as spark.executor.memory. This must
@@ -353,31 +273,6 @@ class SparkContext(object):
         The version of Spark on which this application is running.
         """
         return self._jsc.version()
-
-    @property
-    @ignore_unicode_prefix
-    def applicationId(self):
-        """
-        A unique identifier for the Spark application.
-        Its format depends on the scheduler implementation.
-
-        * in case of local spark app something like 'local-1433865536131'
-        * in case of YARN something like 'application_1433865536131_34483'
-
-        >>> sc.applicationId  # doctest: +ELLIPSIS
-        u'local-...'
-        """
-        return self._jsc.sc().applicationId()
-
-    @property
-    def uiWebUrl(self):
-        """Return the URL of the SparkUI instance started by this SparkContext"""
-        return self._jsc.sc().uiWebUrl().get()
-
-    @property
-    def startTime(self):
-        """Return the epoch time when the Spark Context was started."""
-        return self._jsc.startTime()
 
     @property
     def defaultParallelism(self):
@@ -399,56 +294,13 @@ class SparkContext(object):
         Shut down the SparkContext.
         """
         if getattr(self, "_jsc", None):
-            try:
-                self._jsc.stop()
-            except Py4JError:
-                # Case: SPARK-18523
-                warnings.warn(
-                    'Unable to cleanly shutdown Spark JVM process.'
-                    ' It is possible that the process has crashed,'
-                    ' been killed or may also be in a zombie state.',
-                    RuntimeWarning
-                )
-                pass
-            finally:
-                self._jsc = None
+            self._jsc.stop()
+            self._jsc = None
         if getattr(self, "_accumulatorServer", None):
             self._accumulatorServer.shutdown()
             self._accumulatorServer = None
         with SparkContext._lock:
             SparkContext._active_spark_context = None
-
-    def emptyRDD(self):
-        """
-        Create an RDD that has no partitions or elements.
-        """
-        return RDD(self._jsc.emptyRDD(), self, NoOpSerializer())
-
-    def range(self, start, end=None, step=1, numSlices=None):
-        """
-        Create a new RDD of int containing elements from `start` to `end`
-        (exclusive), increased by `step` every element. Can be called the same
-        way as python's built-in range() function. If called with a single argument,
-        the argument is interpreted as `end`, and `start` is set to 0.
-
-        :param start: the start value
-        :param end: the end value (exclusive)
-        :param step: the incremental step (default: 1)
-        :param numSlices: the number of partitions of the new RDD
-        :return: An RDD of int
-
-        >>> sc.range(5).collect()
-        [0, 1, 2, 3, 4]
-        >>> sc.range(2, 4).collect()
-        [2, 3]
-        >>> sc.range(1, 7, 2).collect()
-        [1, 3, 5]
-        """
-        if end is None:
-            end = start
-            start = 0
-
-        return self.parallelize(xrange(start, end, step), numSlices)
 
     def parallelize(self, c, numSlices=None):
         """
@@ -469,7 +321,7 @@ class SparkContext(object):
             start0 = c[0]
 
             def getStart(split):
-                return start0 + int((split * size / numSlices)) * step
+                return start0 + (split * size / numSlices) * step
 
             def f(split, iterator):
                 return xrange(getStart(split), getStart(split + 1), step)
@@ -479,19 +331,15 @@ class SparkContext(object):
         # because it sends O(n) Py4J commands.  As an alternative, serialized
         # objects are written to a file and loaded through textFile().
         tempFile = NamedTemporaryFile(delete=False, dir=self._temp_dir)
-        try:
-            # Make sure we distribute data evenly if it's smaller than self.batchSize
-            if "__len__" not in dir(c):
-                c = list(c)    # Make it a list so we can compute its length
-            batchSize = max(1, min(len(c) // numSlices, self._batchSize or 1024))
-            serializer = BatchedSerializer(self._unbatched_serializer, batchSize)
-            serializer.dump_stream(c, tempFile)
-            tempFile.close()
-            readRDDFromFile = self._jvm.PythonRDD.readRDDFromFile
-            jrdd = readRDDFromFile(self._jsc, tempFile.name, numSlices)
-        finally:
-            # readRDDFromFile eagerily reads the file so we can delete right after.
-            os.unlink(tempFile.name)
+        # Make sure we distribute data evenly if it's smaller than self.batchSize
+        if "__len__" not in dir(c):
+            c = list(c)    # Make it a list so we can compute its length
+        batchSize = max(1, min(len(c) // numSlices, self._batchSize or 1024))
+        serializer = BatchedSerializer(self._unbatched_serializer, batchSize)
+        serializer.dump_stream(c, tempFile)
+        tempFile.close()
+        readRDDFromFile = self._jvm.PythonRDD.readRDDFromFile
+        jrdd = readRDDFromFile(self._jsc, tempFile.name, numSlices)
         return RDD(jrdd, self, serializer)
 
     def pickleFile(self, name, minPartitions=None):
@@ -507,7 +355,6 @@ class SparkContext(object):
         minPartitions = minPartitions or self.defaultMinPartitions
         return RDD(self._jsc.objectFile(name, minPartitions), self)
 
-    @ignore_unicode_prefix
     def textFile(self, name, minPartitions=None, use_unicode=True):
         """
         Read a text file from HDFS, a local file system (available on all
@@ -520,7 +367,7 @@ class SparkContext(object):
 
         >>> path = os.path.join(tempdir, "sample-text.txt")
         >>> with open(path, "w") as testFile:
-        ...    _ = testFile.write("Hello world!")
+        ...    testFile.write("Hello world!")
         >>> textFile = sc.textFile(path)
         >>> textFile.collect()
         [u'Hello world!']
@@ -529,7 +376,6 @@ class SparkContext(object):
         return RDD(self._jsc.textFile(name, minPartitions), self,
                    UTF8Deserializer(use_unicode))
 
-    @ignore_unicode_prefix
     def wholeTextFiles(self, path, minPartitions=None, use_unicode=True):
         """
         Read a directory of text files from HDFS, a local file system
@@ -557,15 +403,15 @@ class SparkContext(object):
           ...
           (a-hdfs-path/part-nnnnn, its content)
 
-        .. note:: Small files are preferred, as each file will be loaded
-            fully in memory.
+        NOTE: Small files are preferred, as each file will be loaded
+        fully in memory.
 
         >>> dirPath = os.path.join(tempdir, "files")
         >>> os.mkdir(dirPath)
         >>> with open(os.path.join(dirPath, "1.txt"), "w") as file1:
-        ...    _ = file1.write("1")
+        ...    file1.write("1")
         >>> with open(os.path.join(dirPath, "2.txt"), "w") as file2:
-        ...    _ = file2.write("2")
+        ...    file2.write("2")
         >>> textFiles = sc.wholeTextFiles(dirPath)
         >>> sorted(textFiles.collect())
         [(u'.../1.txt', u'1'), (u'.../2.txt', u'2')]
@@ -584,8 +430,8 @@ class SparkContext(object):
         in a key-value pair, where the key is the path of each file, the
         value is the content of each file.
 
-        .. note:: Small files are preferred, large file is also allowable, but
-            may cause bad performance.
+        Note: Small files are preferred, large file is also allowable, but
+        may cause bad performance.
         """
         minPartitions = minPartitions or self.defaultMinPartitions
         return RDD(self._jsc.binaryFiles(path, minPartitions), self,
@@ -608,7 +454,7 @@ class SparkContext(object):
         jm = self._jvm.java.util.HashMap()
         if not d:
             d = {}
-        for k, v in d.items():
+        for k, v in d.iteritems():
             jm[k] = v
         return jm
 
@@ -760,7 +606,6 @@ class SparkContext(object):
         jrdd = self._jsc.checkpointFile(name)
         return RDD(jrdd, self, input_deserializer)
 
-    @ignore_unicode_prefix
     def union(self, rdds):
         """
         Build the union of a list of RDDs.
@@ -771,7 +616,7 @@ class SparkContext(object):
 
         >>> path = os.path.join(tempdir, "union-text.txt")
         >>> with open(path, "w") as testFile:
-        ...    _ = testFile.write("Hello")
+        ...    testFile.write("Hello")
         >>> textFile = sc.textFile(path)
         >>> textFile.collect()
         [u'Hello']
@@ -784,6 +629,7 @@ class SparkContext(object):
             rdds = [x._reserialize() for x in rdds]
         first = rdds[0]._jrdd
         rest = [x._jrdd for x in rdds[1:]]
+        rest = ListConverter().convert(rest, self._gateway._gateway_client)
         return RDD(self._jsc.union(first, rest), self, rdds[0]._jrdd_deserializer)
 
     def broadcast(self, value):
@@ -811,11 +657,11 @@ class SparkContext(object):
             elif isinstance(value, complex):
                 accum_param = accumulators.COMPLEX_ACCUMULATOR_PARAM
             else:
-                raise TypeError("No default accumulator param for type %s" % type(value))
+                raise Exception("No default accumulator param for type %s" % type(value))
         SparkContext._next_accum_id += 1
         return Accumulator(SparkContext._next_accum_id - 1, value, accum_param)
 
-    def addFile(self, path, recursive=False):
+    def addFile(self, path):
         """
         Add a file to be downloaded with this Spark job on every node.
         The C{path} passed can be either a local file, a file in HDFS
@@ -826,13 +672,10 @@ class SparkContext(object):
         L{SparkFiles.get(fileName)<pyspark.files.SparkFiles.get>} with the
         filename to find its download location.
 
-        A directory can be given if the recursive option is set to True.
-        Currently directories are only supported for Hadoop-supported filesystems.
-
         >>> from pyspark import SparkFiles
         >>> path = os.path.join(tempdir, "test.txt")
         >>> with open(path, "w") as testFile:
-        ...    _ = testFile.write("100")
+        ...    testFile.write("100")
         >>> sc.addFile(path)
         >>> def func(iterator):
         ...    with open(SparkFiles.get("test.txt")) as testFile:
@@ -841,7 +684,15 @@ class SparkContext(object):
         >>> sc.parallelize([1, 2, 3, 4]).mapPartitions(func).collect()
         [100, 200, 300, 400]
         """
-        self._jsc.sc().addFile(path, recursive)
+        self._jsc.sc().addFile(path)
+
+    def clearFiles(self):
+        """
+        Clear the job's list of files added by L{addFile} or L{addPyFile} so
+        that they do not get downloaded to any new nodes.
+        """
+        # TODO: remove added .py or .zip files from the PYTHONPATH?
+        self._jsc.sc().clearFiles()
 
     def addPyFile(self, path):
         """
@@ -852,13 +703,11 @@ class SparkContext(object):
         """
         self.addFile(path)
         (dirname, filename) = os.path.split(path)  # dirname may be directory or HDFS/S3 prefix
-        if filename[-4:].lower() in self.PACKAGE_EXTENSIONS:
+
+        if filename.endswith('.zip') or filename.endswith('.ZIP') or filename.endswith('.egg'):
             self._python_includes.append(filename)
             # for tests in local mode
             sys.path.insert(1, os.path.join(SparkFiles.getRootDirectory(), filename))
-        if sys.version > '3':
-            import importlib
-            importlib.invalidate_caches()
 
     def setCheckpointDir(self, dirName):
         """
@@ -893,7 +742,7 @@ class SparkContext(object):
         The application can use L{SparkContext.cancelJobGroup} to cancel all
         running jobs in this group.
 
-        >>> import threading
+        >>> import thread, threading
         >>> from time import sleep
         >>> result = "Not Set"
         >>> lock = threading.Lock()
@@ -912,10 +761,10 @@ class SparkContext(object):
         ...     sleep(5)
         ...     sc.cancelJobGroup("job_to_cancel")
         >>> supress = lock.acquire()
-        >>> supress = threading.Thread(target=start_job, args=(10,)).start()
-        >>> supress = threading.Thread(target=stop_job).start()
+        >>> supress = thread.start_new_thread(start_job, (10,))
+        >>> supress = thread.start_new_thread(stop_job, tuple())
         >>> supress = lock.acquire()
-        >>> print(result)
+        >>> print result
         Cancelled
 
         If interruptOnCancel is set to true for the job group, then job cancellation will result
@@ -939,12 +788,6 @@ class SparkContext(object):
         """
         return self._jsc.getLocalProperty(key)
 
-    def setJobDescription(self, value):
-        """
-        Set a human readable description of the current job.
-        """
-        self._jsc.setJobDescription(value)
-
     def sparkUser(self):
         """
         Get SPARK_USER for user who is running SparkContext.
@@ -964,12 +807,6 @@ class SparkContext(object):
         """
         self._jsc.sc().cancelAllJobs()
 
-    def statusTracker(self):
-        """
-        Return :class:`StatusTracker` object
-        """
-        return StatusTracker(self._jsc.statusTracker())
-
     def runJob(self, rdd, partitionFunc, partitions=None, allowLocal=False):
         """
         Executes the given partitionFunc on the specified set of partitions,
@@ -987,13 +824,14 @@ class SparkContext(object):
         """
         if partitions is None:
             partitions = range(rdd._jrdd.partitions().size())
+        javaPartitions = ListConverter().convert(partitions, self._gateway._gateway_client)
 
         # Implementation note: This is implemented as a mapPartitions followed
         # by runJob() in order to avoid having to pass a Python lambda into
         # SparkContext#runJob.
         mappedRDD = rdd.mapPartitions(partitionFunc)
-        port = self._jvm.PythonRDD.runJob(self._jsc.sc(), mappedRDD._jrdd, partitions)
-        return list(_load_from_socket(port, mappedRDD._jrdd_deserializer))
+        it = self._jvm.PythonRDD.runJob(self._jsc.sc(), mappedRDD._jrdd, javaPartitions, allowLocal)
+        return list(mappedRDD._collect_iterator_through_file(it))
 
     def show_profiles(self):
         """ Print the profile stats to stdout """
@@ -1003,11 +841,6 @@ class SparkContext(object):
         """ Dump the profile stats into directory `path`
         """
         self.profiler_collector.dump_profiles(path)
-
-    def getConf(self):
-        conf = SparkConf()
-        conf.setAll(self._conf.getAll())
-        return conf
 
 
 def _test():

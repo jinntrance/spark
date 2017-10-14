@@ -15,7 +15,6 @@
  * limitations under the License.
  */
 
-// scalastyle:off println
 package org.apache.spark.examples
 
 import java.util.Random
@@ -23,13 +22,15 @@ import java.util.Random
 import scala.collection.mutable.HashMap
 import scala.collection.mutable.HashSet
 
-import breeze.linalg.{squaredDistance, DenseVector, Vector}
+import breeze.linalg.{Vector, DenseVector, squaredDistance}
+
+import org.apache.spark.SparkContext._
 
 /**
  * K-means clustering.
  *
  * This is an example implementation for learning how to use Spark. For more conventional use,
- * please refer to org.apache.spark.ml.clustering.KMeans.
+ * please refer to org.apache.spark.mllib.clustering.KMeans
  */
 object LocalKMeans {
   val N = 1000
@@ -39,19 +40,20 @@ object LocalKMeans {
   val convergeDist = 0.001
   val rand = new Random(42)
 
-  def generateData: Array[DenseVector[Double]] = {
-    def generatePoint(i: Int): DenseVector[Double] = {
-      DenseVector.fill(D) {rand.nextDouble * R}
+  def generateData = {
+    def generatePoint(i: Int) = {
+      DenseVector.fill(D){rand.nextDouble * R}
     }
     Array.tabulate(N)(generatePoint)
   }
 
   def closestPoint(p: Vector[Double], centers: HashMap[Int, Vector[Double]]): Int = {
+    var index = 0
     var bestIndex = 0
     var closest = Double.PositiveInfinity
 
     for (i <- 1 to centers.size) {
-      val vCurr = centers(i)
+      val vCurr = centers.get(i).get
       val tempDist = squaredDistance(p, vCurr)
       if (tempDist < closest) {
         closest = tempDist
@@ -65,7 +67,7 @@ object LocalKMeans {
   def showWarning() {
     System.err.println(
       """WARN: This is a naive implementation of KMeans Clustering and is given as an example!
-        |Please use org.apache.spark.ml.clustering.KMeans
+        |Please use the KMeans method found in org.apache.spark.mllib.clustering
         |for more conventional use.
       """.stripMargin)
   }
@@ -75,8 +77,8 @@ object LocalKMeans {
     showWarning()
 
     val data = generateData
-    val points = new HashSet[Vector[Double]]
-    val kPoints = new HashMap[Int, Vector[Double]]
+    var points = new HashSet[Vector[Double]]
+    var kPoints = new HashMap[Int, Vector[Double]]
     var tempDist = 1.0
 
     while (points.size < K) {
@@ -91,13 +93,13 @@ object LocalKMeans {
     println("Initial centers: " + kPoints)
 
     while(tempDist > convergeDist) {
-      val closest = data.map (p => (closestPoint(p, kPoints), (p, 1)))
+      var closest = data.map (p => (closestPoint(p, kPoints), (p, 1)))
 
-      val mappings = closest.groupBy[Int] (x => x._1)
+      var mappings = closest.groupBy[Int] (x => x._1)
 
-      val pointStats = mappings.map { pair =>
+      var pointStats = mappings.map { pair =>
         pair._2.reduceLeft [(Int, (Vector[Double], Int))] {
-          case ((id1, (p1, c1)), (id2, (p2, c2))) => (id1, (p1 + p2, c1 + c2))
+          case ((id1, (x1, y1)), (id2, (x2, y2))) => (id1, (x1 + x2, y1 + y2))
         }
       }
 
@@ -106,7 +108,7 @@ object LocalKMeans {
 
       tempDist = 0.0
       for (mapping <- newPoints) {
-        tempDist += squaredDistance(kPoints(mapping._1), mapping._2)
+        tempDist += squaredDistance(kPoints.get(mapping._1).get, mapping._2)
       }
 
       for (newP <- newPoints) {
@@ -117,4 +119,3 @@ object LocalKMeans {
     println("Final centers: " + kPoints)
   }
 }
-// scalastyle:on println

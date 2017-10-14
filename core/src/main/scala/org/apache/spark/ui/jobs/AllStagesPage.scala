@@ -22,40 +22,38 @@ import javax.servlet.http.HttpServletRequest
 import scala.xml.{Node, NodeSeq}
 
 import org.apache.spark.scheduler.Schedulable
-import org.apache.spark.ui.{UIUtils, WebUIPage}
+import org.apache.spark.ui.{WebUIPage, UIUtils}
 
 /** Page showing list of all ongoing and recently finished stages and pools */
 private[ui] class AllStagesPage(parent: StagesTab) extends WebUIPage("") {
   private val sc = parent.sc
-  private val listener = parent.progressListener
+  private val listener = parent.listener
   private def isFairScheduler = parent.isFairScheduler
 
   def render(request: HttpServletRequest): Seq[Node] = {
     listener.synchronized {
       val activeStages = listener.activeStages.values.toSeq
       val pendingStages = listener.pendingStages.values.toSeq
-      val completedStages = listener.completedStages.reverse
+      val completedStages = listener.completedStages.reverse.toSeq
       val numCompletedStages = listener.numCompletedStages
-      val failedStages = listener.failedStages.reverse
+      val failedStages = listener.failedStages.reverse.toSeq
       val numFailedStages = listener.numFailedStages
-      val subPath = "stages"
+      val now = System.currentTimeMillis
 
       val activeStagesTable =
-        new StageTableBase(request, activeStages, "active", "activeStage", parent.basePath, subPath,
-          parent.progressListener, parent.isFairScheduler,
-          killEnabled = parent.killEnabled, isFailedStage = false)
+        new StageTableBase(activeStages.sortBy(_.submissionTime).reverse,
+          parent.basePath, parent.listener, isFairScheduler = parent.isFairScheduler,
+          killEnabled = parent.killEnabled)
       val pendingStagesTable =
-        new StageTableBase(request, pendingStages, "pending", "pendingStage", parent.basePath,
-          subPath, parent.progressListener, parent.isFairScheduler,
-          killEnabled = false, isFailedStage = false)
+        new StageTableBase(pendingStages.sortBy(_.submissionTime).reverse,
+          parent.basePath, parent.listener, isFairScheduler = parent.isFairScheduler,
+          killEnabled = false)
       val completedStagesTable =
-        new StageTableBase(request, completedStages, "completed", "completedStage", parent.basePath,
-          subPath, parent.progressListener, parent.isFairScheduler,
-          killEnabled = false, isFailedStage = false)
+        new StageTableBase(completedStages.sortBy(_.submissionTime).reverse, parent.basePath,
+          parent.listener, isFairScheduler = parent.isFairScheduler, killEnabled = false)
       val failedStagesTable =
-        new StageTableBase(request, failedStages, "failed", "failedStage", parent.basePath, subPath,
-          parent.progressListener, parent.isFairScheduler,
-          killEnabled = false, isFailedStage = true)
+        new FailedStageTable(failedStages.sortBy(_.submissionTime).reverse, parent.basePath,
+          parent.listener, isFairScheduler = parent.isFairScheduler)
 
       // For now, pool information is only accessible in live UIs
       val pools = sc.map(_.getAllPools).getOrElse(Seq.empty[Schedulable])
@@ -66,15 +64,22 @@ private[ui] class AllStagesPage(parent: StagesTab) extends WebUIPage("") {
       val shouldShowCompletedStages = completedStages.nonEmpty
       val shouldShowFailedStages = failedStages.nonEmpty
 
-      val completedStageNumStr = if (numCompletedStages == completedStages.size) {
-        s"$numCompletedStages"
-      } else {
-        s"$numCompletedStages, only showing ${completedStages.size}"
-      }
-
       val summary: NodeSeq =
         <div>
           <ul class="unstyled">
+            {
+              if (sc.isDefined) {
+                // Total duration is not meaningful unless the UI is live
+                <li>
+                  <strong>Total Duration: </strong>
+                  {UIUtils.formatDuration(now - sc.get.startTime)}
+                </li>
+              }
+            }
+            <li>
+              <strong>Scheduling Mode: </strong>
+              {listener.schedulingMode.map(_.toString).getOrElse("Unknown")}
+            </li>
             {
               if (shouldShowActiveStages) {
                 <li>
@@ -93,9 +98,9 @@ private[ui] class AllStagesPage(parent: StagesTab) extends WebUIPage("") {
             }
             {
               if (shouldShowCompletedStages) {
-                <li id="completed-summary">
+                <li>
                   <a href="#completed"><strong>Completed Stages:</strong></a>
-                  {completedStageNumStr}
+                  {numCompletedStages}
                 </li>
               }
             }
@@ -115,7 +120,7 @@ private[ui] class AllStagesPage(parent: StagesTab) extends WebUIPage("") {
           if (sc.isDefined && isFairScheduler) {
             <h4>{pools.size} Fair Scheduler Pools</h4> ++ poolTable.toNodeSeq
           } else {
-            Seq.empty[Node]
+            Seq[Node]()
           }
         }
       if (shouldShowActiveStages) {
@@ -123,19 +128,18 @@ private[ui] class AllStagesPage(parent: StagesTab) extends WebUIPage("") {
         activeStagesTable.toNodeSeq
       }
       if (shouldShowPendingStages) {
-        content ++= <h4 id="pending">Pending Stages ({pendingStages.size})</h4> ++
+        content ++= <h4 id="pending">Pending Stages ({pendingStages.size}</h4> ++
         pendingStagesTable.toNodeSeq
       }
       if (shouldShowCompletedStages) {
-        content ++= <h4 id="completed">Completed Stages ({completedStageNumStr})</h4> ++
+        content ++= <h4 id="completed">Completed Stages ({numCompletedStages})</h4> ++
         completedStagesTable.toNodeSeq
       }
       if (shouldShowFailedStages) {
         content ++= <h4 id ="failed">Failed Stages ({numFailedStages})</h4> ++
         failedStagesTable.toNodeSeq
       }
-      UIUtils.headerSparkPage("Stages for All Jobs", content, parent)
+      UIUtils.headerSparkPage("Spark Stages (for all jobs)", content, parent)
     }
   }
 }
-

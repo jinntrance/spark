@@ -32,7 +32,7 @@ private[spark] class PartitionPruningRDDPartition(idx: Int, val parentSplit: Par
  * Represents a dependency between the PartitionPruningRDD and its parent. In this
  * case, the child RDD contains a subset of partitions of the parents'.
  */
-private[spark] class PruneDependency[T](rdd: RDD[T], partitionFilterFunc: Int => Boolean)
+private[spark] class PruneDependency[T](rdd: RDD[T], @transient partitionFilterFunc: Int => Boolean)
   extends NarrowDependency[T](rdd) {
 
   @transient
@@ -40,7 +40,7 @@ private[spark] class PruneDependency[T](rdd: RDD[T], partitionFilterFunc: Int =>
     .filter(s => partitionFilterFunc(s.index)).zipWithIndex
     .map { case(split, idx) => new PartitionPruningRDDPartition(idx, split) : Partition }
 
-  override def getParents(partitionId: Int): List[Int] = {
+  override def getParents(partitionId: Int) = {
     List(partitions(partitionId).asInstanceOf[PartitionPruningRDDPartition].parentSplit.index)
   }
 }
@@ -48,24 +48,22 @@ private[spark] class PruneDependency[T](rdd: RDD[T], partitionFilterFunc: Int =>
 
 /**
  * :: DeveloperApi ::
- * An RDD used to prune RDD partitions/partitions so we can avoid launching tasks on
+ * A RDD used to prune RDD partitions/partitions so we can avoid launching tasks on
  * all partitions. An example use case: If we know the RDD is partitioned by range,
  * and the execution DAG has a filter on the key, we can avoid launching tasks
  * on partitions that don't have the range covering the key.
  */
 @DeveloperApi
 class PartitionPruningRDD[T: ClassTag](
-    prev: RDD[T],
-    partitionFilterFunc: Int => Boolean)
+    @transient prev: RDD[T],
+    @transient partitionFilterFunc: Int => Boolean)
   extends RDD[T](prev.context, List(new PruneDependency(prev, partitionFilterFunc))) {
 
-  override def compute(split: Partition, context: TaskContext): Iterator[T] = {
-    firstParent[T].iterator(
-      split.asInstanceOf[PartitionPruningRDDPartition].parentSplit, context)
-  }
+  override def compute(split: Partition, context: TaskContext) = firstParent[T].iterator(
+    split.asInstanceOf[PartitionPruningRDDPartition].parentSplit, context)
 
   override protected def getPartitions: Array[Partition] =
-    dependencies.head.asInstanceOf[PruneDependency[T]].partitions
+    getDependencies.head.asInstanceOf[PruneDependency[T]].partitions
 }
 
 
@@ -76,7 +74,7 @@ object PartitionPruningRDD {
    * Create a PartitionPruningRDD. This function can be used to create the PartitionPruningRDD
    * when its type T is not known at compile time.
    */
-  def create[T](rdd: RDD[T], partitionFilterFunc: Int => Boolean): PartitionPruningRDD[T] = {
+  def create[T](rdd: RDD[T], partitionFilterFunc: Int => Boolean) = {
     new PartitionPruningRDD[T](rdd, partitionFilterFunc)(rdd.elementClassTag)
   }
 }

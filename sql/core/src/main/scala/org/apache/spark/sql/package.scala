@@ -17,8 +17,8 @@
 
 package org.apache.spark
 
-import org.apache.spark.annotation.{DeveloperApi, InterfaceStability}
-import org.apache.spark.sql.execution.SparkStrategy
+import org.apache.spark.annotation.DeveloperApi
+import org.apache.spark.sql.execution.SparkPlan
 
 /**
  * Allows the execution of relational queries, including those expressed in SQL using Spark.
@@ -34,14 +34,8 @@ import org.apache.spark.sql.execution.SparkStrategy
 package object sql {
 
   /**
-   * Converts a logical plan into zero or more SparkPlans.  This API is exposed for experimenting
-   * with the query planner and is not designed to be stable across spark releases.  Developers
-   * writing libraries should instead consider using the stable APIs provided in
-   * [[org.apache.spark.sql.sources]]
+   * Converts a logical plan into zero or more SparkPlans.
    */
   @DeveloperApi
-  @InterfaceStability.Unstable
-  type Strategy = SparkStrategy
-
-  type DataFrame = Dataset[Row]
+  protected[sql] type Strategy = org.apache.spark.sql.catalyst.planning.GenericStrategy[SparkPlan]
 }
