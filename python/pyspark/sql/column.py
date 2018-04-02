@@ -16,7 +16,6 @@
 #
 
 import sys
-import warnings
 import json
 
 if sys.version >= '3':
@@ -44,8 +43,14 @@ def _create_column_from_name(name):
 def _to_java_column(col):
     if isinstance(col, Column):
         jcol = col._jc
-    else:
+    elif isinstance(col, basestring):
         jcol = _create_column_from_name(col)
+    else:
+        raise TypeError(
+            "Invalid argument, not a string or column: "
+            "{0} of type {1}. "
+            "For column literals, use 'lit', 'array', 'struct' or 'create_map' "
+            "function.".format(col, type(col)))
     return jcol
 
 
@@ -406,8 +411,14 @@ class Column(object):
         [Row(col=u'Ali'), Row(col=u'Bob')]
         """
         if type(startPos) != type(length):
-            raise TypeError("Can not mix the type")
-        if isinstance(startPos, (int, long)):
+            raise TypeError(
+                "startPos and length must be the same type. "
+                "Got {startPos_t} and {length_t}, respectively."
+                .format(
+                    startPos_t=type(startPos),
+                    length_t=type(length),
+                ))
+        if isinstance(startPos, int):
             jc = self._jc.substr(startPos, length)
         elif isinstance(startPos, Column):
             jc = self._jc.substr(startPos._jc, length._jc)
@@ -648,7 +659,7 @@ def _test():
         optionflags=doctest.ELLIPSIS | doctest.NORMALIZE_WHITESPACE | doctest.REPORT_NDIFF)
     spark.stop()
     if failure_count:
-        exit(-1)
+        sys.exit(-1)
 
 
 if __name__ == "__main__":
